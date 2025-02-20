@@ -15,7 +15,6 @@ $ export KUBECONFIG=~/$CONFIG_DIR/oneconfig:~/$ANOTHER_DIR/anotherconfig
 $ kubectl config view --flatten > ~/.kube/config
 ```
 3. 使用
-
 查看contexts
 ```bash
 $ oc config get-contexts
