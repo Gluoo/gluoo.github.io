@@ -1,0 +1,436 @@
+---
+layout: page
+title:  "一文讲清楚Tekton"
+date:   2025-03-06 15:43:00 +0800
+categories: jekyll update
+---
+
+一两年前有项目需要用tekton，当时负责pipeline的同事丢给我一堆文档，看吧，简单的很。一脸茫然，因为需求就是简单的使用一下，但是不得不面对一系列不成体系的文档和各种奇葩的名词，硬着头皮整了一段时间。
+时移世易，手里有个项目要做云原生改造，持续集成选型选了Tekton，官方文档一如既往的零零碎碎，东一榔头西一棒槌，我希望有一个介绍，安装，使用端到端的文档，没有符合自己意愿的。磕磕巴巴的把tekton搞定了，记录于此，以备参考。
+
+
+1. 什么是Tekton
+- 官网： https://tekton.dev/docs/getting-started/ 
+- Tekton是一个开源的云原生CICD解决方案
+
+2. 安装
+
+-  前置条件, `kubernetes cluster`，版本大于1.25.x。既然是“云原生”CICD解决方案，基本就只能跑在kubernetes上了。多说一句，只要提“云原生”，八九不离十就是kubernetes，原因自行搜索。
+
+- 官方没有提供helm charts或者kustomize形式的安装文件，推荐用Operator去安装: https://github.com/tektoncd/operator/blob/main/docs/install.md 
+
+   2.1. 安装Operator：
+
+   ```bash
+   $ kubectl apply -f https://storage.googleapis.com/tekton-releases/operator/latest/release.yaml
+   ```
+   2.2. 安装必要的组件
+   ```bash
+   $ kubectl apply -f https://raw.githubusercontent.com/tektoncd/operator/main/config/crs/kubernetes/config/all/operator_v1alpha1_config_cr.yaml
+   ```
+  PS：需要科学上网
+
+  2.3 检查安装结果
+  ```bash
+  $ kubectl get po -n tekton-operator
+    NAME                                       READY   STATUS    RESTARTS      AGE
+    tekton-operator-879cc4595-kc9dx            2/2     Running   2 (42d ago)   42d
+    tekton-operator-webhook-578dd45d8d-qc9xw   1/1     Running   1 (42d ago)   42d
+  ```
+
+  ```
+  $ oc get po -n tekton-pipelines
+   NAME                                                 READY   STATUS    RESTARTS      AGE
+   tekton-chains-controller-88bbf7ff-jlm6c              1/1     Running   1 (42d ago)   42d
+   tekton-dashboard-867d8b7bbb-fxtd8                    1/1     Running   0             42d
+   tekton-events-controller-59f4c8795-wvwnc             1/1     Running   1 (42d ago)   42d
+   tekton-operator-proxy-webhook-84d54c946c-7mfd7       1/1     Running   0             42d
+   tekton-pipelines-controller-75598c9cd8-w6dj7         1/1     Running   1 (42d ago)   42d
+   tekton-pipelines-remote-resolvers-76c7b98c46-8hmgh   1/1     Running   0             42d
+   tekton-pipelines-webhook-7559f7785b-zkpps            1/1     Running   1 (42d ago)   42d
+   tekton-triggers-controller-546c8f7b5f-jpl9h          1/1     Running   0             42d
+   tekton-triggers-core-interceptors-5589dd79bb-c7nhb   1/1     Running   1 (42d ago)   42d
+   tekton-triggers-webhook-85744dfd85-5dgh5             1/1     Running   1 (42d ago)   42d
+   ```
+3. 使用
+
+下图是官网菜单，如果没搞过tekton，那就看吧，不把你看晕就不叫官网。
+
+![官方菜单](/images/tekton-menu.png)
+
+下面我以一个例子来把这些具体概念一一串起来。
+
+3.1 Tekton需要拿源代码做build，现在主流的代码管理系统基本都是git及其衍生品，gitlab，gitea等，功能大同小异。要把git跟Tekton联系起来，是不是需要给git配置一个webhook，那么第一步我们需要创建一个webhook。这个webhook的实现在Tekton里就叫做EventListener
+
+```yaml
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: tekton-event-listener
+  namespace: ci-pipeline
+spec:
+  serviceAccountName: tekton-event-listener-sa
+  triggers:
+    - name: pullrequest-trigger
+      interceptors:
+        - ref:
+            name: cel
+          params:
+            - name: filter
+              value: "header.match('X-GitHub-Event', 'pull_request') && (body.action == 'opened' || body.action == 'synchronized')"
+      template:
+        ref: pr-pipeline-template
+      bindings:
+        - ref: pr-pipeline-bindings
+    - name: merge-to-main-trigger
+      interceptors:
+        - ref:
+            name: cel
+          params:
+            - name: filter
+              value: "header.match('X-GitHub-Event', 'pull_request') && (body.action == 'closed' && body.pull_request.merged == true && body.pull_request.base.ref == 'main')"
+      template:
+        ref: main-pipeline-template
+      bindings:
+        - ref: main-pipeline-bindings    
+```
+
+这个eventlistener主要就是监听了两个事件，第一个事件
+```yaml
+  triggers:
+    - name: pullrequest-trigger
+      interceptors:
+        - ref:
+            name: cel
+          params:
+            - name: filter
+              value: "header.match('X-GitHub-Event', 'pull_request') && (body.action == 'opened' || body.action == 'synchronized')"
+      template:
+        ref: pr-pipeline-template
+      bindings:
+        - ref: pr-pipeline-bindings
+```
+- GitHub 触发 Webhook:
+
+  当有人在 GitHub 上创建或更新 Pull Request 时，GitHub 发送一个 Webhook 到 Tekton 的 EventListener。
+
+  请求头包含 X-GitHub-Event: pull_request，Body 包含事件详情（如 action: opened）。
+- 拦截器过滤:
+
+  pullrequest-trigger 的 CEL 拦截器检查头和 Body。
+
+  如果满足条件（pull_request 且 opened 或 synchronized），事件通过。
+
+- 绑定参数:
+
+  pr-pipeline-bindings 从事件中提取参数（如 git-repo-url）。
+
+- 启动流水线:
+  pr-pipeline-template 使用绑定参数生成并运行一个 PipelineRun，执行构建、测试等任务。
+
+第二个事件类似，监听不同事件，触发不同pipeline
+
+3.2 上面的EventListener里有两个依赖，一个是template，另一个是binding，下面就该他们上场了。先让template出来吧
+```yaml
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: pr-pipeline-template
+  namespace: ci-pipeline
+spec:
+  params: 
+     - name: git_revision
+     - name: commit_sha
+     - name: pr_number
+     - name: git_url
+     - name: repo_owner
+     - name: repo_name
+  resourcetemplates:
+  - apiVersion: tekton.dev/v1beta1
+    kind: PipelineRun
+    metadata:
+      name: gitea-pipeline-run-$(tt.params.commit_sha)
+      namespace: ci-pipeline
+    spec:
+      serviceAccountName: tekton-images-sa
+      params:
+        - name: git_url
+          value: $(tt.params.git_url)
+        - name: commit_sha
+          value: $(tt.params.commit_sha)  
+        - name: pr_number
+          value: $(tt.params.pr_number)  
+        - name: repo_owner
+          value: $(tt.params.repo_owner)
+        - name: repo_name
+          value: $(tt.params.repo_name)    
+        - name: git_revision
+          value: $(tt.params.git_revision)  
+      pipelineRef:
+        name: pr-pipeline
+```
+这段 YAML 是一个 Tekton TriggerTemplate 的定义，用于在 Tekton CI/CD 系统中生成 PipelineRun 实例。它的作用是将触发器（Trigger）接收的事件参数传递给流水线（Pipeline），并动态创建运行实例
+
+下面是binding
+```yaml
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: pr-pipeline-bindings
+  namespace: ci-pipeline
+spec:
+  params:
+    - name: git_revision
+      value: $(body.pull_request.head.ref)
+    - name: commit_sha
+      value: $(body.pull_request.head.sha)  
+    - name: pr_number
+      value: $(body.number)  
+    - name: git_url
+      value: $(body.repository.clone_url)  
+    - name: repo_owner 
+      value: $(body.repository.owner.login)
+    - name: repo_name
+      value: $(body.repository.name)  
+```
+
+这段 YAML 定义了一个 Tekton TriggerBinding，名为 pr-pipeline-bindings，用于从 GitHub Webhook 事件（Pull Request 相关）中提取数据，并将其映射为参数，供 TriggerTemplate使用。
+
+
+3.3 上面的TriggerTemplate里是不是有一个pipelineRef，所以要整一个pipeline
+```yaml
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: pr-pipeline
+  namespace: ci-pipeline
+spec:
+  params: 
+  - name: git_url
+    type: string
+  - name: pr_number
+    type: string
+  - name: commit_sha
+    type: string  
+  - name: repo_owner
+    type: string
+  - name: repo_name
+    type: string  
+  - name: git_revision
+    type: string  
+  tasks:
+  - name: set-pr-pending
+    taskRef:
+      name: update-gitea-status
+    params:
+      - name: state
+        value: "pending" 
+      - name: pr_number
+        value: "$(params.pr_number)"
+      - name: commit_sha
+        value: "$(params.commit_sha)"
+      - name: repo_owner
+        value: "$(params.repo_owner)"
+      - name: repo_name
+        value: "$(params.repo_name)"    
+  - name: dockerfile-lint
+    taskRef:
+      name: dockerfile-lint
+    params:
+      - name: git_url
+        value: "$(params.git_url)"
+      - name: git_revision
+        value: "$(params.git_revision)"
+    runAfter:
+      - set-pr-pending
+  - name: sonar-scan
+    taskRef:
+      name: sonar-scan
+    params: 
+       - name: git_url
+         value: $(params.git_url)
+       - name: pr_number
+         value: $(params.pr_number)
+       - name: commit_sha
+         value: $(params.commit_sha)    
+    runAfter:
+      - dockerfile-lint      
+  - name: build-push-image
+    taskRef:
+      name: build-push-image
+    params:
+      - name: git_url
+        value: "$(params.git_url)"  
+      - name: commit_sha
+        value: "$(params.commit_sha)"  
+      - name: git_revision
+        value: "$(params.git_revision)"  
+    runAfter:
+      - sonar-scan 
+  finally:
+    - name: report-failure
+      when: 
+        - input: $(tasks.status)
+          operator: in
+          values: ["Failed", "None"]
+      taskRef:
+        name: update-gitea-status
+      params:
+        - name: state
+          value: "failed"  
+        - name: pr_number
+          value: "$(params.pr_number)"
+        - name: commit_sha
+          value: "$(params.commit_sha)" 
+        - name: repo_owner
+          value: "$(params.repo_owner)" 
+        - name: repo_name
+          value: "$(params.repo_name)"    
+    - name: report-success
+      when: 
+        - input: $(tasks.status)
+          operator: in
+          values: ["Succeeded", "Completed"]
+      taskRef:
+        name: update-gitea-status
+      params:
+        - name: state
+          value: "success"  
+        - name: pr_number
+          value: "$(params.pr_number)"
+        - name: commit_sha
+          value: "$(params.commit_sha)"      
+        - name: repo_owner
+          value: "$(params.repo_owner)"
+        - name: repo_name
+          value: "$(params.repo_name)"  
+```
+
+pipeline里是不是调用各种task，所以继续创建task
+
+3.4 Sample task
+```yaml
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: dockerfile-lint
+  namespace: ci-pipeline
+  annotations:
+    description: Optional linter for Dockerfiles; if a ".hadolint" file is in the repo root, this task automatically picks up; otherwise hadolint file name must be passed via ConfigMap. See Hadolint on Dockerhub for more
+spec:
+  params:
+    - name: git_url
+    - name: git_revision
+      default: main
+    - name: source_dir
+      default: /source
+    - name: DOCKERFILE
+      default: Dockerfile
+    - name: CONTEXT
+      default: .
+    - name: LINT_IMAGE
+      default: harbor.creditsearch.net/library/hadolint:v1.1
+    - name: lint-dockerfile
+      default: "true"
+  volumes:
+    - name: source
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - name: source
+        mountPath: $(params.source_dir)
+  steps:
+    - name: git-clone
+      image: harbor.creditsearch.net/library/alpine-git:v1.2
+      env:
+        - name: GIT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: git-credentials
+              key: password
+              optional: true
+        - name: GIT_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: git-credentials
+              key: username
+              optional: true
+      script: |
+        set +x
+        if [[ -n "${GIT_USERNAME}" ]] && [[ -n "${GIT_PASSWORD}" ]]; then
+            git clone "$(echo $(params.git_url) | awk -F '://' '{print $1}')://${GIT_USERNAME}:${GIT_PASSWORD}@$(echo $(params.git_url) | awk -F '://' '{print $2}')" $(params.source_dir)
+        else
+            set -x
+            git clone $(params.git_url) $(params.source_dir)
+        fi
+        set -x
+        cd $(params.source_dir)
+        git checkout $(params.git_revision)
+    - name: lint
+      image: $(params.LINT_IMAGE)
+      workingDir: $(params.source_dir)
+      env:
+        - name: HADOLINT_CFG
+          valueFrom:
+            configMapKeyRef:
+              name: hadolint-config
+              key: HADOLINT_CFG
+              optional: true
+      script: |
+        PERFORM_LINT="$(params.lint-dockerfile)"
+        if [[ "${PERFORM_LINT}" == "false" ]] || [[ -z "${PERFORM_LINT}" ]]; then
+          echo "User selected to skip Dockerfile linting. Skipping this task."
+          exit 0
+        fi
+
+        FILE="$(params.source_dir)"/.hadolint.yaml
+
+        if [ -f "${HADOLINT_CFG}" ]; then
+          FILE="$(params.source_dir)/${HADOLINT_CFG}"
+          echo "In this step, hadolint will lint your Dockerfile, using ${FILE}, with the following rules: "
+          cat ${FILE}
+          echo "For more information about hadolint please refer to https://cloudnativetoolkit.dev/"
+          hadolint --config ${HADOLINT_CFG} $(params.DOCKERFILE)
+
+        elif [ -f "${FILE}" ]; then
+          echo "In this step, hadolint will lint your Dockerfile, using .hadolint.yaml in your repository, with the following rules: "
+          cat "${FILE}"
+          echo "For more information about hadolint please refer to https://cloudnativetoolkit.dev/"
+          hadolint $(params.DOCKERFILE)
+
+        else
+          echo "In this step, hadolint will lint your Dockerfile"
+          echo "If you would like to configure hadolint, please see https://github.com/hadolint/hadolint"
+          echo "For more information about hadolint please refer to https://cloudnativetoolkit.dev/"
+          hadolint $(params.DOCKERFILE)
+        fi
+```
+
+至此，是不是就从头到尾串起来了，eventlistener-> binding-> template -> pipeline -> task
+
+按照这个逻辑再去官网看相关的名词解释，就明了很多。
+
+如果git和tekton不在同一个cluster，还需要在eventlistener前面加一个ingress。
+Sample ingress:
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tekton-triggers-ingress
+  namespace: ci-pipeline
+spec:
+  rules:
+  - host: $domain_name
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: el-tekton-event-listener
+            port:
+              number: 8080
+```
+
+这样在git里配置webhook，就能把相应event发送到tekton的eventlistener了，EL会把后面的逻辑串起来。
+

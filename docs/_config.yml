@@ -21,7 +21,7 @@
 title: joey's technical blog
 email: joey8656@qq.com
 description: >- # this means to ignore newlines until "baseurl:"
-  Record technical problems and their solutions encountered in daily work and share them with everyone.
+  在这个ai泛滥的浮躁的世界，保持一片相对原始的自留地，闲暇时刻跟自己对个话，干个杯。
 baseurl: "" # the subpath of your site, e.g. /blog
 url: "" # the base hostname & protocol for your site, e.g. http://example.com
 twitter_username: dq3911
