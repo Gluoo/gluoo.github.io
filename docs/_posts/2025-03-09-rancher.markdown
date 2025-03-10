@@ -1,0 +1,202 @@
+---
+layout: page
+title:  "Rancher Server, RKE and Longhorn"
+date:   2025-03-09 21:48:00 +0800
+categories: jekyll update
+---
+
+# Rancher Server
+
+Rancher Server 是一个 Kubernetes 管理平台，它提供了一个统一的界面，用于在本地和云端部署、管理和监控 Kubernetes 集群。它简化了容器化应用程序的部署、配置和维护。
+
+#### 安装
+1. Prerequisites
+- `os`： `All supported operating systems are 64-bit x86. Rancher should work with any modern Linux distribution.` https://ranchermanager.docs.rancher.com/getting-started/installation-and-upgrade/installation-requirements 官网说法是只要是主流的Linux发行版，且是64 位 x86 架构的都支持。
+- `docker`：> 25.0.x, < 27.0.x。 不要用最新的docker，跟RKE兼容性有问题，推荐用27.0.1
+- `代理`：从docker hub上pull image可能有问题，最好通过代理访问。   
+  给docker daemon设置代理常用方式：   
+  新建或者编辑`/etc/docker/daemon.json`    
+  ```json
+  {
+      "proxies": {
+      "http-proxy": "$your-http-proxy",
+      "https-proxy": "$your-https-proxy",
+      "no-proxy": "localhost,127.0.0.1"
+    },
+    "data-root": "/data/docker"
+  } 
+  ```
+
+     我的环境磁盘mount到了`/data`目录，所以我把docker文件目录改为了`/data/docker`
+
+#### 运行Rancher server
+```bash
+$ sudo docker run -d --name rancher-server   --restart=unless-stopped   -p 80:80 -p 443:443 --privileged   rancher/rancher:latest
+```
+如果需要HA，参考 [Rancher官方文档](https://www.rancher.com/docs/rancher/v1.6/en/installing-rancher/installing-server/#multi-nodes) 
+
+首次运行rancher server的时候，会自动生成一个bootstrap密码：
+```bash
+$ docker logs <container-id> 2>&1 | grep "Bootstrap Password:"
+```
+
+#### 查看portal
+
+通过ip访问portal，比如你的rancher server运行在10.0.50.22，在浏览器上打开[https://10.0.50.22](https://10.0.50.22), 用户名：`admin`, 密码： 输入上面步骤取到的bootstrap密码，应该就能看到类似下图的UI
+
+![portal](/images/rancher.png)
+
+
+# RKE
+
+RKE全称Rancher Kubernetes Engine，它是一个用于创建和管理Kubernetes集群的工具。它是一个在Docker容器中运行的、经过 CNCF 认证的 Kubernetes发行版。
+
+功能特点：
+
+- 可在裸机和虚拟化服务器上运行
+- 简化 Kubernetes 的安装和操作
+- 独立于操作系统和平台
+- 可作为独立软件使用
+
+**选型决策：**
+
+| **发行版**       | **企业支持** | **部署灵活性** | **成本** | **优势**                                                                 | **劣势**                                                                 | **适用场景**                          |
+|-------------------|--------------|----------------|----------|-------------------------------------------------------------------------|--------------------------------------------------------------------------|---------------------------------------|
+| **原生 Kubernetes** | 否          | 高            | 低       | 灵活性强，开源免费                                                     | 学习和运维门槛高，缺乏企业级支持和附加功能                               | 技术能力强，追求灵活性                |
+| **OpenShift**    | 是          | 中            | 高       | 企业支持：官方 Red Hat 支持和认证<br>集成工具：内置 CI/CD（如 OpenShift Pipelines）、监控工具、日志收集等<br>强化安全性：默认启用 RBAC 和 SELinux | 成本较高（需购买许可证）<br>部署复杂，锁定在 Red Hat 生态中（如 CoreOS、RHEL） | 企业级应用，注重安全与支持            |
+| **OKD**          | 否          | 中            | 中       | 完全开源，灵活部署，丰富的生态系统，部分企业级功能（多租户、角色访问控制、日志和监控等） | 社区支持不足，文档相对较少<br>OKD 需要更多资源，对于小规模环境可能较重   | 预算有限但需要增强 Kubernetes 功能的企业<br>有能力通过社区资源解决问题的小型团队 |
+| **Rancher**      | 是          | 高            | 中       | 经过 CNCF 认证的 Kubernetes 发行版<br>易于部署：支持多种部署方式，包括本地、云和混合架构<br>强大的 UI 界面，支持多集群管理和监控<br>与其他生态兼容性强（如 Calico、Istio） | 社区支持主导，企业支持有限<br>对于超大规模集群，性能和功能可能不如 OpenShift | 中小团队，多集群管理                  |
+| **Tanzu**        | 是          | 中            | 高       | 企业集成：与 VMware 生态（如 NSX、vSAN）无缝集成<br>企业支持：VMware 提供 SLA 支持和定制服务 | 依赖 VMware 生态，锁定性较强<br>成本高                                   | 使用 VMware 生态的企业                |
+| **K3s**          | 否          | 高            | 低       | 轻量级：仅 40MB 二进制包，适合 IoT 和边缘计算<br>简单易用：内置数据库（SQLite）和常用插件（如 Flannel）<br>部署快速：一条命令即可启动 | 不支持高并发场景，功能不如全功能 Kubernetes                             | IoT，边缘计算、资源受限场景           |
+
+最终选择Rancher的理由归结为：**易用性、灵活性、成本效益和多集群管理的完美平衡**
+
+
+#### 安装
+1. Prerequisites   
+
+    - Server端跟`Rancher Server`一样
+
+    - 客户端（本地）
+      - Helm v3 [https://helm.sh/docs/intro/install/](https://helm.sh/docs/intro/install/)
+      - Kubectl 小于等于1.31.3 [https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/](https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/)
+
+2. 下载rke，[rke binary](https://github.com/rancher/rke/releases),下载一个stable版本的二进制
+
+3. 准备要被RKE托管的机器，保证所有机器上的login用户可以sudo免密码，或者更简单直接的方式，安装过程暂时允许root用户登录。具体怎么设置，自行搜索，本guide不再赘述. 
+
+
+4. 生成kubernetes安装配置文件，根据你的设计，比如哪几个node是master，哪几个是worker，哪几个是etcd等等，生成相应的config文件。 网络插件选calico，RKE简化了calico的配置，基本不需要额外配置。
+
+    ```bash
+    $ rke config
+    ```
+    默认会生成一个`cluster.yml`文件
+
+5. 安装
+
+    ```bash
+    $ rke up --config cluster.yml
+    ```
+
+    一切正常的话，安装完会在当前目录生成一个`kube_config_cluster.yml`, 用这个kubeconfig就可以登录到刚才安装好的cluster上了.
+    ```bash
+    $ export KUBECONFIG=./kube_config_cluster.yml
+    $ kubectl get node
+    NAME      STATUS   ROLES               AGE   VERSION
+    master1   Ready    controlplane,etcd   1d    v1.31.3
+    master2   Ready    controlplane,etcd   1d    v1.31.3
+    master3   Ready    controlplane,etcd   1d    v1.31.3
+    worker1   Ready    worker              1d    v1.31.3
+    worker2   Ready    worker              1d    v1.31.3
+    worker3   Ready    worker              1d    v1.31.3
+    ....
+    ```
+
+6. 如果有GPU机器需要被kubernetes托管，还需要安装NVIDIA CUDA Toolkit和NVIDIA GPU Operator
+  - NVIDIA CUDA Toolkit: 在GPU机器上按照这个guide安装[https://docs.nvidia.com/cuda/cuda-installation-guide-linux/](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/)
+  - NVIDIA GPU Operator: 安装完NVIDIA CUDA Toolkit后，再安装GPU Operator，主要用于在Kubernetes集群中管理和配置NVIDIA GPU资源的工具。按照官网guide安装[https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html)
+
+7. 在deployment里使用GPU
+```yaml
+....
+containers:
+        - name: llm-qwen
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.llmqwen.image.repository }}:{{ .Values.llmqwen.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.llmqwen.image.pullPolicy }}
+          resources:
+            limits:
+              nvidia.com/gpu: 1  
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: CUDA_VISIBLE_DEVICES
+              value: {{ .Values.cuda.num0 | quote }}
+....              
+```
+主要加上`nvidia.com/gpu: 1`，使用多少个gpu，本例是使用1个gpu。`CUDA_VISIBLE_DEVICES`用第几个GPU，如果不指定，默认从第0个开始.
+
+8. (Optional) 托管RKE到Rancher server portal，Rancher server提供了一个多集群管理的portal，把RKE加入到该portal，通过 Rancher Server的仪表板统一监控和操作，降低管理复杂度；且Rancher server提供了多集群管理，用户和权限管理，集成监控日志等，甚至有一个简单的应用商店，都可以简化以后运维cluster的复杂度。
+
+- 打开Rancher srever portal，点击"Import Existing"
+![longhorn](/images/add-to-rancher-1.png)
+- 选择`Generic`类型cluster
+![longhorn](/images/add-to-rancher-2.png)
+- 填写cluster 名字，点击create按钮
+![longhorn](/images/add-to-rancher-3.png)
+- 按照生成的命令，在本地运行就可以了
+- 正常的话，cluster会出现在portal上，就可以对cluster进行日常运维管理了
+
+
+# Longhorn
+
+Longhorn 是一个免费的开源存储系统，专为Kubernetes设计，允许用户以块存储的方式存储数据。它可用于在 Kubernetes 集群中为应用程序创建持久化存储。Longhorn由Rancher Labs开发，现已成为云原生计算基金会（CNCF）的沙箱项目
+
+功能特点:
+
+- 高可用性：Longhorn 能够将数据跨多个节点和数据中心进行复制
+- 灾难恢复：Longhorn 可以创建跨集群卷，以便从主集群恢复数据到备份集群
+- 备份：Longhorn 支持调度定期备份到外部存储
+- 快照：Longhorn 可以创建数据的即时快照，用于备份
+- 精简配置：Longhorn 卷仅占用当前所需的存储空间
+- Longhorn 可以通过 Helm、kubectl 或 Rancher UI 安装在任何 Kubernetes 集群上
+- Longhorn 专为与 Kubernetes 协同工作而设计，可以通过 Kubernetes 界面或 API 进行管理
+
+**选型决策：**
+
+| **存储方案**      | **特点**                                              | **优势**                              | **劣势**                       | **适用场景**                          |
+|-------------------|-------------------------------------------------------|---------------------------------------|--------------------------------|---------------------------------------|
+| **NFS**          | 简单易用，广泛支持。文件存储                          | 易于配置，成本低                      | 性能瓶颈，单点故障             | 轻量级应用，共享文件系统              |
+| **Rook + Ceph**  | 高性能、高可用、可扩展。支持文件存储、块存储、对象存储 | 性能优异，可靠性高                    | 对硬件及网络条件要求高，运维成本高 | 大规模数据存储，高性能要求，数据强一致性，大规模生产环境 |
+| **GlusterFS**    | 高性能，可扩展。文件存储                              | 性能高，可扩展性好                    | 配置复杂，部分高级特性收费     | 大文件存储，高吞吐量                  |
+| **Longhorn**     | 为 Kubernetes 设计，易用。支持块存储                  | 易用性好，与 Kubernetes 深度集成，资源占用小，支持备份和快照，维护成本低 | 社区生态相对较新               | 云原生应用，快速部署，中小规模 K8s 集群，资源有限的环境 |
+| **Local Storage**| 利用 worker node 本地存储                            | 性能好                                | 单点故障                       | 性能要求高，对数据一致性要求不高的场景 |
+
+
+因为我们要在kube里运行mongo和redis等有状态应用，需要从kubernetes里挂在块存储，显然仅支持文件存储的方案不适用。为了保证一定程度上的HA，存在单点故障的方案也不适合。最后只剩下Rook+Ceph和Longhorn，因为Ceph对硬件要求比较高，开发测试环境我们可以先从Longhorn开始，如果性能不能满足要求，再考虑Ceph。
+
+#### 安装
+上面我们安装了RKE, 现在可以在该kubernetes cluster上安装Longhorn了。
+
+Longhorn安装非常简单，官网提供了7种安装方式。[https://longhorn.io/docs/1.7.2/deploy/install/](https://longhorn.io/docs/1.7.2/deploy/install/)
+
+推荐用kubectl安装，[https://longhorn.io/docs/1.7.2/deploy/install/install-with-kubectl/](https://longhorn.io/docs/1.7.2/deploy/install/install-with-kubectl/)
+
+```bash
+$ kubectl apply -f https://raw.githubusercontent.com/longhorn/longhorn/v1.7.2/deploy/longhorn.yaml
+```
+检查Longhorn是否安装成功：
+```bash
+$ kubectl -n longhorn-system get pod
+```
+如果所有pod都是running状态，说明安装成功
+
+#### 进入Longhorn Portal
+
+安装完longhorn后，Rancher server菜单里会多一个`longhorn`的菜单,点击就可以进入到longhorn portal
+
+![longhorn](/images/longhorn.png)
