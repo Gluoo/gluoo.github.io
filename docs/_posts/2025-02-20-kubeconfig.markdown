@@ -1,6 +1,6 @@
 ---
 layout: page
-title:  "Merge multiple kubeconfig files"
+title:  "合并多个kubeconfig文件"
 date:   2025-02-20 11:20:00 +0800
 categories: jekyll update
 ---
